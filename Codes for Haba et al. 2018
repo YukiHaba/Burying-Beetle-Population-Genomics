@@ -1,0 +1,90 @@
+### This is code examples used in Haba et al. 2018 ###
+
+### Trim raw reads for adapters and low quality reads with Trimmomatic ###
+
+java -jar Trimmomatic-0.36/trimmomatic-0.35.jar PE -threads 20 -phred33 *R1.fastq.gz *R2.fastq.gz output_LGC16_KS01_forward_paired.fq.gz output_LGC16_KS01_forward_unpaired.fq.gz output_LGC16_KS01_reverse_paired.fq.gz output_LGC16_KS01_reverse_unpaired.fq.gz ILLUMINACLIP:Trimmomatic-0.36/adapters/TruSeq_all.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+
+### Mapping with bwa-mem ###
+
+bwa mem -t 10 \
+		RefGenome.fa \
+		ReadDataFolder/Sample_LGC16_KS01*/*forward_paired.fq.gz \
+		ReadDataFolder/Sample_LGC16_KS01*/*reverse_paired.fq.gz | samtools view -bS - > KS01.raw.1.bam
+done
+
+### merge BAM files
+samtools merge ./FinalBAMs/KS01.merged.bam KS01.raw.1.bam KS01.raw.2.bam KS01.raw.2.bam &
+
+### Sort BAM files
+samtools sort ./FinalBAMs/KS01.merged.bam -o ./FinalBAMs/KS01.merged.sorted.bam &
+
+### Add Read Tags
+java -jar picard.jar AddOrReplaceReadGroups \
+       I=./FinalBAMs/KS01.merged.sorted.bam \
+       O=./FinalBAMs/KS01.merged.sorted.RGtagged.bam \
+       RGPU=NA \
+       RGID=KS01.Merged \
+       RGLB=PE150 \
+       RGPL=illumina \
+       RGSM=KS01
+
+### Mark Duplicates
+java -jar picard.jar MarkDuplicates \
+        METRICS_FILE=KS01.MarkDup.Metrics CREATE_INDEX=true MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 \
+        INPUT=./FinalBAMs/KS01.merged.sorted.RGtagged.bam \
+        OUTPUT=./FinalBAMs/KS01.merged.sorted.RGtagged.markdup.bam
+
+### Check basic BAM stats
+samtools flagstat KS01*.bam > KS01.flagstat 
+
+
+### Call variants with HaplotypeCaller in GATK 4 ###
+
+### call g.vcf files
+./gatk HaplotypeCaller \
+	-R RefGenome.fa \
+	-I BAMFileFolder/KS01.*.bam \
+	-ERC GVCF \
+	-O KS01.g.vcf
+  
+### Combine gVCFs 
+./gatk CombineGVCFs \
+   -R RefGenome.fa \
+   --variant KS01.g.vcf \
+   --variant KS02.g.vcf \
+   -o Combined.g.vcf
+
+### Genotype gVCFs 
+./gatk GenotypeGVCFs \
+   -R RefGenome.fa \
+   --variant Combined.g.vcf \
+   -o Raw.vcf
+   
+### Apply a hard filter on the raw variants ###
+### SNPs
+./gatk VariantFiltration \
+    -R RefGenome.fa \
+    -V Raw_SNPs.vcf \
+    --filter-expression "QD < 2.0 || FS > 60.0 || MQ < 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0" \
+    --filter-name "HardFilter_SNPs" \
+    -O FilterMark_SNPs.vcf
+
+./gatk SelectVariants \
+   -R RefGenome.fa \
+   -V FilterMark_SNPs.vcf \
+   --exclude-filtered \
+   -O Filtered_SNPs.vcf
+
+### INDELs
+./gatk VariantFiltration \
+    -R RefGenome.fa \
+    -V Raw_INDELs.vcf \
+    --filter-expression "QD < 2.0 || FS > 200.0 || ReadPosRankSum < -20.0" \
+    --filter-name "HardFilter_INDELs" \
+    -O FilterMark_INDELs.vcf
+
+./gatk SelectVariants \
+   -R RefGenome.fa \
+   -V FilterMark_INDELs.vcf \
+   --exclude-filtered \
+   -O Filtered_INDELs.vcf
